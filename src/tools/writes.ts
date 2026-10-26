@@ -74,6 +74,16 @@ const numericIdSchema = (label: string) =>
 
 const emailListSchema = z.array(z.string().min(1)).max(10);
 
+// Same shape on Create Note and Create Reply:
+// https://developer.helpscout.com/mailbox-api/endpoints/conversations/threads/note/
+const attachmentSchema = z.strictObject({
+  fileName: z.string().min(1).describe('File name shown on the thread.'),
+  mimeType: z.string().min(1).describe('MIME type, for example image/png.'),
+  data: z.base64().min(1).describe('File content, base64 encoded.'),
+});
+
+type Attachment = z.infer<typeof attachmentSchema>;
+
 /** Conversation fields the write operations read back before merging. */
 interface ConversationReadModel {
   tags?: Array<{ tag?: string }>;
@@ -440,12 +450,18 @@ export class WriteHandler {
     const schema = z.strictObject({
       conversationId: conversationIdSchema,
       text: z.string().min(1).describe('Note body. Visible to teammates in Help Scout, never to the customer.'),
+      user: numericIdSchema('User ID').optional().describe('Help Scout user ID the note is added as.'),
+      attachments: z.array(attachmentSchema).optional().describe('Files to attach to the note.'),
     });
 
     const plan = (input: z.infer<typeof schema>): PlannedRequest => ({
       method: 'POST',
       path: `${conversationPath(input.conversationId)}/notes`,
-      body: { text: input.text },
+      body: {
+        text: input.text,
+        ...(input.user ? { user: Number(input.user) } : {}),
+        ...(Array.isArray(input.attachments) && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
+      },
     });
 
     return defineWrite({
@@ -479,6 +495,8 @@ export class WriteHandler {
       assignTo: numericIdSchema('User ID').optional().describe('Help Scout user ID to assign the conversation to.'),
       cc: emailListSchema.optional().describe('Email addresses to CC when the draft is later sent.'),
       bcc: emailListSchema.optional().describe('Email addresses to BCC when the draft is later sent.'),
+      user: numericIdSchema('User ID').optional().describe('Help Scout user ID the draft is added as.'),
+      attachments: z.array(attachmentSchema).optional().describe('Files to attach to the draft.'),
     });
 
     return defineWrite({
@@ -993,6 +1011,8 @@ interface ReplyInput {
   status?: string;
   cc?: string[];
   bcc?: string[];
+  user?: string;
+  attachments?: Attachment[];
 }
 
 /**
@@ -1035,6 +1055,8 @@ function buildReplyBody(
     ...(input.status ? { status: input.status } : {}),
     ...(Array.isArray(input.cc) && input.cc.length > 0 ? { cc: input.cc } : {}),
     ...(Array.isArray(input.bcc) && input.bcc.length > 0 ? { bcc: input.bcc } : {}),
+    ...(input.user ? { user: Number(input.user) } : {}),
+    ...(Array.isArray(input.attachments) && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
   };
 }
 

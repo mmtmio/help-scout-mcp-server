@@ -140,6 +140,64 @@ describe('WriteHandler', () => {
       expect(scope.isDone()).toBe(true);
     });
 
+    it('posts the note as the named user with its attachments', async () => {
+      const attachment = { fileName: 'report.md', mimeType: 'text/markdown', data: 'IyBSZXBvcnQ=' };
+      const scope = nock(baseURL)
+        .post(`/conversations/${CONVERSATION_ID}/notes`, {
+          text: 'internal only',
+          user: 12,
+          attachments: [attachment],
+        })
+        .reply(201, '', { 'Resource-Id': '883' });
+
+      const result = await run('createNote', {
+        conversationId: CONVERSATION_ID,
+        text: 'internal only',
+        user: '12',
+        attachments: [attachment],
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(scope.isDone()).toBe(true);
+    });
+
+    it('saves the draft as the named user with its attachments', async () => {
+      const attachment = { fileName: 'screenshot-1.png', mimeType: 'image/png', data: 'iVBORw0KGgo=' };
+      const scope = nock(baseURL)
+        .post(`/conversations/${CONVERSATION_ID}/reply`, {
+          text: 'draft body',
+          draft: true,
+          customer: { id: 77 },
+          user: 12,
+          attachments: [attachment],
+        })
+        .reply(201, '', { 'Resource-Id': '884' });
+
+      const result = await run('createDraftReply', {
+        conversationId: CONVERSATION_ID,
+        text: 'draft body',
+        customerId: '77',
+        user: '12',
+        attachments: [attachment],
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(scope.isDone()).toBe(true);
+    });
+
+    it('rejects attachment data that is not base64 without sending a request', async () => {
+      const scope = nock(baseURL).post(`/conversations/${CONVERSATION_ID}/notes`).reply(201);
+
+      const result = await run('createNote', {
+        conversationId: CONVERSATION_ID,
+        text: 'internal only',
+        attachments: [{ fileName: 'report.md', mimeType: 'text/markdown', data: '# Report' }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(scope.isDone()).toBe(false);
+    });
+
     it('refuses a caller-supplied draft flag on createDraftReply', async () => {
       // The schema has no `draft` property and is strict, so an argument that
       // tries to flip the operation into a send is refused rather than dropped:
