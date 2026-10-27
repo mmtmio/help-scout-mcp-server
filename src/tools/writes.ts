@@ -82,7 +82,18 @@ const attachmentSchema = z.strictObject({
   data: z.base64().min(1).describe('File content, base64 encoded.'),
 });
 
+// A local server reads the file itself, so a caller can attach a screenshot
+// without writing out its base64. Only files under HELPSCOUT_ATTACHMENT_DIR.
+const fileAttachmentSchema = z.strictObject({
+  fileName: z.string().min(1).describe('File name shown on the thread.'),
+  mimeType: z.string().min(1).describe('MIME type, for example image/png.'),
+  filePath: z.string().min(1).describe('Absolute path to the file, inside HELPSCOUT_ATTACHMENT_DIR. Local server only.'),
+});
+
+const attachmentInputSchema = z.union([attachmentSchema, fileAttachmentSchema]);
+
 type Attachment = z.infer<typeof attachmentSchema>;
+type AttachmentInput = z.infer<typeof attachmentInputSchema>;
 
 /** Conversation fields the write operations read back before merging. */
 interface ConversationReadModel {
@@ -451,7 +462,7 @@ export class WriteHandler {
       conversationId: conversationIdSchema,
       text: z.string().min(1).describe('Note body. Visible to teammates in Help Scout, never to the customer.'),
       user: numericIdSchema('User ID').optional().describe('Help Scout user ID the note is added as.'),
-      attachments: z.array(attachmentSchema).optional().describe('Files to attach to the note.'),
+      attachments: z.array(attachmentInputSchema).optional().describe('Files to attach to the note, each as base64 data or a filePath.'),
     });
 
     const plan = (input: z.infer<typeof schema>): PlannedRequest => ({
@@ -472,7 +483,7 @@ export class WriteHandler {
       mutationClass: 'nonDestructive',
       plan,
       perform: async (input) => {
-        const response = await sendPlanned(plan(input));
+        const response = await sendPlanned(plan({ ...input, attachments: await readAttachments(input.attachments) }));
         return {
           result: {
             httpStatus: response.status,
@@ -496,7 +507,7 @@ export class WriteHandler {
       cc: emailListSchema.optional().describe('Email addresses to CC when the draft is later sent.'),
       bcc: emailListSchema.optional().describe('Email addresses to BCC when the draft is later sent.'),
       user: numericIdSchema('User ID').optional().describe('Help Scout user ID the draft is added as.'),
-      attachments: z.array(attachmentSchema).optional().describe('Files to attach to the draft.'),
+      attachments: z.array(attachmentInputSchema).optional().describe('Files to attach to the draft, each as base64 data or a filePath.'),
     });
 
     return defineWrite({
@@ -523,10 +534,11 @@ export class WriteHandler {
         };
       },
       perform: async (input) => {
+        const attachments = await readAttachments(input.attachments);
         const customer = await resolveReplyCustomer(input);
         const response = await getClient().post(
           `${conversationPath(input.conversationId)}/reply`,
-          buildReplyBody(input, true, customer),
+          buildReplyBody({ ...input, attachments }, true, customer),
         );
         return {
           result: {
@@ -1012,7 +1024,45 @@ interface ReplyInput {
   cc?: string[];
   bcc?: string[];
   user?: string;
-  attachments?: Attachment[];
+  attachments?: AttachmentInput[];
+}
+
+/**
+ * Read each attachment given by filePath into the base64 data Help Scout takes.
+ * Files outside HELPSCOUT_ATTACHMENT_DIR are refused, so text in a conversation
+ * cannot get an arbitrary local file attached to it. fs is imported here, not at
+ * the top, so the Workers build only loads it when a filePath is used.
+ */
+async function readAttachments(attachments: AttachmentInput[] | undefined): Promise<Attachment[] | undefined> {
+  if (!attachments?.some((attachment) => 'filePath' in attachment)) return attachments as Attachment[] | undefined;
+
+  const directory = process.env.HELPSCOUT_ATTACHMENT_DIR;
+  if (!directory) {
+    throw new PreWriteError(
+      'Attachments by filePath are off because HELPSCOUT_ATTACHMENT_DIR is not set.',
+      'No mutation was attempted. Pass the file as base64 data, or set HELPSCOUT_ATTACHMENT_DIR to the folder the files are in and restart the server.',
+    );
+  }
+
+  const { readFile, realpath } = await import('node:fs/promises');
+  const path = await import('node:path');
+  const allowed = await realpath(directory);
+
+  return Promise.all(attachments.map(async (attachment) => {
+    if (!('filePath' in attachment)) return attachment;
+
+    const resolved = await realpath(attachment.filePath).catch(() => undefined);
+    const relative = resolved ? path.relative(allowed, resolved) : '..';
+    if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new PreWriteError(
+        `${attachment.filePath} is not a file inside HELPSCOUT_ATTACHMENT_DIR.`,
+        'No mutation was attempted. Attach only files inside HELPSCOUT_ATTACHMENT_DIR, by their absolute path.',
+      );
+    }
+
+    const contents = await readFile(resolved as string);
+    return { fileName: attachment.fileName, mimeType: attachment.mimeType, data: contents.toString('base64') };
+  }));
 }
 
 /**
