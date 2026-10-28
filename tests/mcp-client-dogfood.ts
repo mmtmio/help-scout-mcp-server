@@ -135,6 +135,7 @@ const DESCRIBE_CHUNK_SIZE = 10;
 const TIER_ONE_WRITE_OPERATIONS = [
   'createNote',
   'createDraftReply',
+  'updateDraftReply',
   'updateConversationStatus',
   'assignConversation',
   'unassignConversation',

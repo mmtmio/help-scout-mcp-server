@@ -7,11 +7,14 @@ import { z } from 'zod/v4';
 import {
   HelpScoutWriteError,
   getClient,
+  type PaginatedResponse,
   type WriteMethod,
   type WriteResponse,
 } from '../utils/api.js';
 import { createMcpToolError } from '../utils/mcp-errors.js';
 import { cache } from '../utils/cache.js';
+import { config } from '../utils/config.js';
+import { REDACTED_MESSAGE_BODY } from '../utils/constants.js';
 import { logger } from '../utils/logger.js';
 
 /** How far a write reaches, per the write tool contract. */
@@ -100,6 +103,14 @@ interface ConversationReadModel {
   tags?: Array<{ tag?: string }>;
   customFields?: Array<{ id?: number; value?: unknown }>;
   primaryCustomer?: { id?: number };
+}
+
+/** Thread fields updateDraftReply reads before editing. */
+interface ThreadReadModel {
+  id?: number;
+  type?: string;
+  state?: string;
+  body?: string;
 }
 
 interface PerformOutcome {
@@ -238,6 +249,41 @@ async function readConversation(conversationId: string): Promise<ConversationRea
   }
 }
 
+/**
+ * Find one thread by reading the conversation's thread list fresh. Help Scout
+ * has no get-thread endpoint, and a cached page could still show a draft that a
+ * teammate has since sent. Threads come newest first, so a draft is usually on
+ * the first page.
+ */
+async function readThread(conversationId: string, threadId: string): Promise<ThreadReadModel> {
+  const path = `${conversationPath(conversationId)}/threads`;
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    let response: PaginatedResponse<ThreadReadModel>;
+    try {
+      response = await getClient().get<PaginatedResponse<ThreadReadModel>>(path, { page }, { ttl: 0 });
+    } catch (error) {
+      throw new PreWriteError(
+        `The read this operation performs before writing failed: ${error instanceof Error ? error.message : String(error)}`,
+        'No mutation was attempted. This operation reads the conversation threads before writing, and that read failed, so nothing was sent that could change Help Scout state. Resolve the read failure, then call the operation again.',
+        statusOf(error),
+      );
+    }
+
+    const thread = (response._embedded?.threads ?? []).find((entry) => String(entry.id) === threadId);
+    if (thread) return thread;
+    totalPages = response.page?.totalPages ?? 1;
+    page += 1;
+  } while (page <= totalPages);
+
+  throw new PreWriteError(
+    `Thread ${threadId} is not on conversation ${conversationId}.`,
+    'No mutation was attempted. Call getThreads to find the draft thread ID on this conversation, then call the operation again.',
+  );
+}
+
 function currentTags(conversation: ConversationReadModel): string[] {
   return (conversation.tags ?? [])
     .map((entry) => entry.tag)
@@ -356,6 +402,7 @@ export class WriteHandler {
   private readonly definitions: AnyWriteDefinition[] = [
     this.createNoteDefinition(),
     this.createDraftReplyDefinition(),
+    this.updateDraftReplyDefinition(),
     this.updateConversationStatusDefinition(),
     this.assignConversationDefinition(),
     this.unassignConversationDefinition(),
@@ -555,6 +602,59 @@ export class WriteHandler {
   }
 
   // --- Tier 1: reversible -----------------------------------------------
+
+  private updateDraftReplyDefinition(): AnyWriteDefinition {
+    const schema = z.strictObject({
+      conversationId: conversationIdSchema,
+      threadId: numericIdSchema('Thread ID').describe('ID of the draft thread, from getThreads or the threadId createDraftReply returned.'),
+      text: z.string().min(1).describe('New draft body. It replaces the whole draft text rather than adding to it.'),
+    });
+
+    // https://developer.helpscout.com/mailbox-api/endpoints/conversations/threads/update/
+    const plan = (input: z.infer<typeof schema>): PlannedRequest => ({
+      method: 'PATCH',
+      path: `${conversationPath(input.conversationId)}/threads/${input.threadId}`,
+      body: { op: 'replace', path: '/text', value: input.text },
+      precededBy: { method: 'GET', path: `${conversationPath(input.conversationId)}/threads` },
+      bodyNote: 'The thread list is read first as a guard: the patch is sent only if this thread is still a draft. The read does not change the body.',
+    });
+
+    return defineWrite({
+      name: 'updateDraftReply',
+      title: 'Replace the text of an unsent draft reply',
+      description: 'Replace the text of an unsent draft reply on a Help Scout conversation, so a draft can be corrected instead of adding another. The thread is read first and the change is refused unless it is still a draft, so a sent reply, a customer message, or a note is never rewritten. The draft stays unsent. Help Scout allows thread edits only for an administrator or when thread editing is enabled for the account, so a 403 usually means that permission is missing. Reversible by calling it again with the previousText it returns.',
+      schema,
+      mutationClass: 'reversible',
+      plan,
+      perform: async (input) => {
+        const thread = await readThread(input.conversationId, input.threadId);
+        if (thread.state !== 'draft') {
+          throw new PreWriteError(
+            `Thread ${input.threadId} is a ${thread.type ?? 'thread'} in state ${thread.state ?? 'none'}, not a draft, so its text was not changed.`,
+            'No mutation was attempted. updateDraftReply only edits unsent drafts, never a sent reply, a customer message, or a note. Call getThreads to find the draft thread ID.',
+          );
+        }
+
+        // A draft sent in the moment between that read and this patch would
+        // still be edited; Help Scout offers no conditional update to close it.
+        const response = await sendPlanned(plan(input));
+        const redacted = config.security.redactMessageContent;
+        return {
+          result: {
+            httpStatus: response.status,
+            body: null,
+            threadId: input.threadId,
+            previousText: redacted ? REDACTED_MESSAGE_BODY : thread.body ?? null,
+            note: 'The draft text was replaced and the draft is still unsent. Help Scout returns no response body for this endpoint.',
+            verifyWith: 'Call getThreads to see the new draft text.',
+          },
+          cleanup: noCleanupNeeded(redacted
+            ? 'Message content is redacted on this server, so the earlier text is not returned and cannot be restored through it.'
+            : 'Call updateDraftReply again with previousText to restore the earlier text.'),
+        };
+      },
+    });
+  }
 
   private updateConversationStatusDefinition(): AnyWriteDefinition {
     const schema = z.strictObject({

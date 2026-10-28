@@ -7,6 +7,8 @@ import { basename, join } from 'node:path';
 import '../utils/helpscout-client.js';
 import { WriteHandler, WriteOperation } from '../tools/writes.js';
 import { cache } from '../utils/cache.js';
+import { config } from '../utils/config.js';
+import { REDACTED_MESSAGE_BODY } from '../utils/constants.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 const baseURL = 'https://api.helpscout.net/v2';
@@ -64,6 +66,7 @@ describe('WriteHandler', () => {
       const expected: Record<string, string> = {
         createNote: 'nonDestructive',
         createDraftReply: 'nonDestructive',
+        updateDraftReply: 'reversible',
         updateConversationStatus: 'reversible',
         assignConversation: 'reversible',
         unassignConversation: 'reversible',
@@ -585,6 +588,154 @@ describe('WriteHandler', () => {
     });
   });
 
+  describe('updateDraftReply', () => {
+    const THREAD_ID = '991';
+    const threadsPath = `/conversations/${CONVERSATION_ID}/threads`;
+    const threadPath = `${threadsPath}/${THREAD_ID}`;
+
+    /** One page of the thread list, as Help Scout returns it. */
+    function threadsPage(threads: Array<Record<string, unknown>>, number = 1, totalPages = 1) {
+      return {
+        _embedded: { threads },
+        page: { size: 25, totalElements: threads.length, totalPages, number },
+      };
+    }
+
+    it('replaces the text of a draft after reading its state', async () => {
+      nock(baseURL)
+        .get(threadsPath)
+        .query({ page: 1 })
+        .reply(200, threadsPage([{ id: 991, type: 'message', state: 'draft', body: '<p>old draft</p>' }]));
+      const scope = nock(baseURL)
+        .patch(threadPath, { op: 'replace', path: '/text', value: '<p>corrected draft</p>' })
+        .reply(204);
+
+      const result = await run('updateDraftReply', {
+        conversationId: CONVERSATION_ID,
+        threadId: THREAD_ID,
+        text: '<p>corrected draft</p>',
+      });
+      const payload = parsePayload(result).result as Record<string, unknown>;
+
+      expect(result.isError).toBeUndefined();
+      expect(scope.isDone()).toBe(true);
+      expect(payload.previousText).toBe('<p>old draft</p>');
+    });
+
+    it.each([
+      ['a sent reply', { type: 'message', state: 'published' }],
+      ['a customer message', { type: 'customer', state: 'published' }],
+      ['a note', { type: 'note', state: 'published' }],
+      ['a line item, which has no state', { type: 'lineitem' }],
+    ])('refuses %s without sending a request', async (_case, thread) => {
+      nock(baseURL)
+        .get(threadsPath)
+        .query({ page: 1 })
+        .reply(200, threadsPage([{ id: 991, body: 'already sent', ...thread }]));
+      const scope = nock(baseURL).patch(threadPath).reply(204);
+
+      const result = await run('updateDraftReply', {
+        conversationId: CONVERSATION_ID,
+        threadId: THREAD_ID,
+        text: 'rewritten',
+      });
+      const payload = parsePayload(result);
+      const error = payload.error as Record<string, unknown>;
+
+      expect(result.isError).toBe(true);
+      expect(scope.isDone()).toBe(false);
+      expect(error.phase).toBe('preWriteRead');
+      expect(String(error.message)).toContain('not a draft');
+    });
+
+    it('reads the thread state fresh, so a draft sent since a cached read is refused', async () => {
+      // Prime the cache with the same request the guard makes, the way a
+      // getThreads read before the edit would.
+      nock(baseURL)
+        .get(threadsPath)
+        .query({ page: 1 })
+        .reply(200, threadsPage([{ id: 991, type: 'message', state: 'draft', body: 'draft' }]));
+      const { helpScoutClient } = await import('../utils/helpscout-client.js');
+      await helpScoutClient.get(threadsPath, { page: 1 });
+
+      nock(baseURL)
+        .get(threadsPath)
+        .query({ page: 1 })
+        .reply(200, threadsPage([{ id: 991, type: 'message', state: 'published', body: 'draft' }]));
+      const scope = nock(baseURL).patch(threadPath).reply(204);
+
+      const result = await run('updateDraftReply', {
+        conversationId: CONVERSATION_ID,
+        threadId: THREAD_ID,
+        text: 'rewritten',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(scope.isDone()).toBe(false);
+    });
+
+    it('finds the draft on a later page of the thread list', async () => {
+      nock(baseURL)
+        .get(threadsPath)
+        .query({ page: 1 })
+        .reply(200, threadsPage([{ id: 990, type: 'customer', state: 'published' }], 1, 2))
+        .get(threadsPath)
+        .query({ page: 2 })
+        .reply(200, threadsPage([{ id: 991, type: 'message', state: 'draft', body: 'draft' }], 2, 2));
+      const scope = nock(baseURL).patch(threadPath).reply(204);
+
+      const result = await run('updateDraftReply', {
+        conversationId: CONVERSATION_ID,
+        threadId: THREAD_ID,
+        text: 'rewritten',
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(scope.isDone()).toBe(true);
+    });
+
+    it('refuses a thread that is not on the conversation without sending a request', async () => {
+      nock(baseURL)
+        .get(threadsPath)
+        .query({ page: 1 })
+        .reply(200, threadsPage([{ id: 990, type: 'customer', state: 'published' }]));
+      const scope = nock(baseURL).patch(threadPath).reply(204);
+
+      const result = await run('updateDraftReply', {
+        conversationId: CONVERSATION_ID,
+        threadId: THREAD_ID,
+        text: 'rewritten',
+      });
+      const error = parsePayload(result).error as Record<string, unknown>;
+
+      expect(result.isError).toBe(true);
+      expect(scope.isDone()).toBe(false);
+      expect(String(error.guidance)).toContain('getThreads');
+    });
+
+    it('withholds the previous text when message content is redacted', async () => {
+      nock(baseURL)
+        .get(threadsPath)
+        .query({ page: 1 })
+        .reply(200, threadsPage([{ id: 991, type: 'message', state: 'draft', body: 'private draft' }]));
+      nock(baseURL).patch(threadPath).reply(204);
+      config.security.redactMessageContent = true;
+
+      try {
+        const payload = parsePayload(await run('updateDraftReply', {
+          conversationId: CONVERSATION_ID,
+          threadId: THREAD_ID,
+          text: 'rewritten',
+        }));
+
+        expect((payload.result as Record<string, unknown>).previousText).toBe(REDACTED_MESSAGE_BODY);
+        expect(JSON.stringify(payload)).not.toContain('private draft');
+      } finally {
+        config.security.redactMessageContent = false;
+      }
+    });
+  });
+
   describe('result envelope', () => {
     it('reports a succeeded write with its target and cleanup plan', async () => {
       nock(baseURL).post(`/conversations/${CONVERSATION_ID}/notes`).reply(201, '', { 'Resource-Id': '881' });
@@ -862,6 +1013,21 @@ describe('WriteHandler', () => {
         path: `/conversations/${CONVERSATION_ID}`,
         body: { op: 'move', path: '/mailboxId', value: 31 },
       });
+      expect(pendingWriteMocks()).toEqual([]);
+    });
+
+    it('describes the draft text patch and the state read that guards it', () => {
+      const planned = operation('updateDraftReply').plan({
+        conversationId: CONVERSATION_ID,
+        threadId: '991',
+        text: 'corrected draft',
+      });
+
+      expect(planned.method).toBe('PATCH');
+      expect(planned.path).toBe(`/conversations/${CONVERSATION_ID}/threads/991`);
+      expect(planned.body).toEqual({ op: 'replace', path: '/text', value: 'corrected draft' });
+      expect(planned.precededBy).toEqual({ method: 'GET', path: `/conversations/${CONVERSATION_ID}/threads` });
+      expect(planned.bodyNote).toContain('draft');
       expect(pendingWriteMocks()).toEqual([]);
     });
 
