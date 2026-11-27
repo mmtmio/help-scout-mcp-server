@@ -504,6 +504,7 @@ export class WriteHandler {
       customerId: numericIdSchema('Customer ID').optional().describe('Customer the reply addresses. When omitted, the conversation primary customer is resolved and used.'),
       customerEmail: z.string().min(1).optional().describe('Customer email, as an alternative to customerId.'),
       assignTo: numericIdSchema('User ID').optional().describe('Help Scout user ID to assign the conversation to.'),
+      status: z.enum(['active', 'closed', 'pending']).optional().describe('Conversation status the draft carries, for when it is later sent.'),
       cc: emailListSchema.optional().describe('Email addresses to CC when the draft is later sent.'),
       bcc: emailListSchema.optional().describe('Email addresses to BCC when the draft is later sent.'),
       user: numericIdSchema('User ID').optional().describe('Help Scout user ID the draft is added as.'),

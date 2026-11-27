@@ -143,6 +143,27 @@ describe('WriteHandler', () => {
       expect(scope.isDone()).toBe(true);
     });
 
+    it('saves the draft with the status it carries', async () => {
+      const scope = nock(baseURL)
+        .post(`/conversations/${CONVERSATION_ID}/reply`, {
+          text: 'draft body',
+          draft: true,
+          customer: { id: 77 },
+          status: 'closed',
+        })
+        .reply(201, '', { 'Resource-Id': '885' });
+
+      const result = await run('createDraftReply', {
+        conversationId: CONVERSATION_ID,
+        text: 'draft body',
+        customerId: '77',
+        status: 'closed',
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(scope.isDone()).toBe(true);
+    });
+
     it('posts the note as the named user with its attachments', async () => {
       const attachment = { fileName: 'report.md', mimeType: 'text/markdown', data: 'IyBSZXBvcnQ=' };
       const scope = nock(baseURL)
