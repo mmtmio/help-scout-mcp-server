@@ -21,6 +21,7 @@ const docsBaseURL = 'https://docsapi.helpscout.net/v1';
 const TIER_1_OPERATIONS = [
   'createNote',
   'createDraftReply',
+  'updateDraftReply',
   'updateConversationStatus',
   'assignConversation',
   'unassignConversation',

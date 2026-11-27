@@ -252,7 +252,7 @@ Missing, false, or mismatched confirmation is refused before anything reaches He
 
 | Tier | Gate | Operations |
 |------|------|------------|
-| 1 | `HELPSCOUT_ENABLE_WRITES` | `createNote`, `createDraftReply`, `updateConversationStatus`, `assignConversation`, `unassignConversation`, `addConversationTags`, `removeConversationTags`, `updateConversationFields`, `snoozeConversation`, `unsnoozeConversation`, `moveConversation` |
+| 1 | `HELPSCOUT_ENABLE_WRITES` | `createNote`, `createDraftReply`, `updateDraftReply`, `updateConversationStatus`, `assignConversation`, `unassignConversation`, `addConversationTags`, `removeConversationTags`, `updateConversationFields`, `snoozeConversation`, `unsnoozeConversation`, `moveConversation` |
 | 2 | plus `HELPSCOUT_ENABLE_CUSTOMER_VISIBLE_WRITES` | `sendReply`, `publishDraft` |
 
 Deletes and admin configuration writes are not exposed under any flag. See [references/tool-reference.md](references/tool-reference.md) for the full operation list.

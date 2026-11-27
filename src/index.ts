@@ -43,6 +43,7 @@ function writeInstructionBlock(writesEnabled: boolean): string {
 - write_help_scout executes one write operation: { "name": "<operation>", "arguments": { ... } }
 - Discover write operations through search_help_scout like any other; they are labeled with their mutation class
 - Draft first: createDraftReply saves an unsent draft and cannot send. Notes are internal and never notify the customer
+- To correct a draft, call updateDraftReply with its threadId instead of adding another draft
 - sendReply and publishDraft email the customer and cannot be recalled. Each call must also carry "confirm": true, "confirmOperation" set to the operation name, and "targetId" equal to the conversation ID in "arguments"
 - Confirm with the user before any customer-visible write. Never send on your own initiative
 - Set "dryRun": true to see the exact request that would be sent without contacting Help Scout`;
